@@ -54,7 +54,7 @@ namespace ufo
     ExprSet allVars;
     Expr getModel() { return getModel(allVars); }
 
-    template <typename T> boost::tribool isSat(T& cnjs, bool reset=true)
+    template <typename T> bool isSat(T& cnjs, bool reset=true)
     {
       allVars.clear();
       if (reset) smt.reset();
@@ -77,12 +77,12 @@ namespace ufo
         }
       }
       boost::tribool res = smt.solve ();
-      return res;
+      return (bool)res;
     }
     /**
      * SMT-check
      */
-    boost::tribool isSat(Expr a, Expr b, bool reset=true)
+    bool isSat(Expr a, Expr b, bool reset=true)
     {
       ExprSet cnjs;
       getConj(a, cnjs);
@@ -93,7 +93,7 @@ namespace ufo
     /**
      * SMT-check
      */
-    boost::tribool isSat(Expr a, bool reset=true)
+    bool isSat(Expr a, bool reset=true)
     {
       ExprSet cnjs;
       getConj(a, cnjs);

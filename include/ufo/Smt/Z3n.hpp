@@ -66,31 +66,6 @@ namespace z3
 
 namespace z3
 {
-  // -- fixedpoint class is missing from z3++.h
-  class fixedpoint : public object
-  {
-    Z3_fixedpoint m_fixedpoint;
-    void init (Z3_fixedpoint f)
-    {
-      m_fixedpoint = f;
-      Z3_fixedpoint_inc_ref (ctx(), f);
-    }
-  public:
-    fixedpoint(context & c):object(c) { init(Z3_mk_fixedpoint(c)); }
-    fixedpoint(context & c, Z3_fixedpoint s):object(c) { init(s); }
-    fixedpoint(fixedpoint const & s):object(s) { init(s.m_fixedpoint); }
-    ~fixedpoint() { Z3_fixedpoint_dec_ref(ctx(), m_fixedpoint); }
-    operator Z3_fixedpoint() const { return m_fixedpoint; }
-    fixedpoint & operator=(fixedpoint const & s) {
-      Z3_fixedpoint_inc_ref(s.ctx(), s.m_fixedpoint);
-      Z3_fixedpoint_dec_ref(ctx(), m_fixedpoint);
-      m_ctx = s.m_ctx;
-      m_fixedpoint = s.m_fixedpoint;
-      return *this;
-    }
-    void set(params const & p)
-    { Z3_fixedpoint_set_params(ctx(), m_fixedpoint, p); check_error(); }
-  };
     
     class ast_map : public object {
         Z3_ast_map m_map;
@@ -198,8 +173,14 @@ namespace ufo
   {
     z3::context &ctx = z3.get_ctx ();
 
-    z3::ast ast (ctx, Z3_parse_smtlib2_string (ctx, smt.c_str (),
-					       0, NULL, NULL, 0, NULL, NULL));
+    Z3_ast_vector b = Z3_parse_smtlib2_string (ctx, smt.c_str (), 0, NULL, NULL, 0, NULL, NULL);
+    Z3_ast* args = new Z3_ast[Z3_ast_vector_size(ctx, b)];
+    
+    for (unsigned i = 0; i < Z3_ast_vector_size(ctx, b); ++i) {
+      args[i] = Z3_ast_vector_get(ctx, b, i);
+    }
+    
+    z3::ast ast (ctx, Z3_mk_and(ctx, Z3_ast_vector_size(ctx, b), args));
     ctx.check_error ();
     return z3.toExpr (ast);
   }
@@ -208,8 +189,15 @@ namespace ufo
   Expr z3_from_smtlib_file (Z &z3, const char *fname)
   {
     z3::context &ctx = z3.get_ctx ();
-    z3::ast ast (ctx, Z3_parse_smtlib2_file (ctx, fname,
-                                             0, NULL, NULL, 0, NULL, NULL));
+
+    Z3_ast_vector b = Z3_parse_smtlib2_file (ctx, fname, 0, NULL, NULL, 0, NULL, NULL);
+    Z3_ast* args = new Z3_ast[Z3_ast_vector_size(ctx, b)];
+    
+    for (unsigned i = 0; i < Z3_ast_vector_size(ctx, b); ++i) {
+      args[i] = Z3_ast_vector_get(ctx, b, i);
+    }
+    
+    z3::ast ast (ctx, Z3_mk_and(ctx, Z3_ast_vector_size(ctx, b), args));
     ctx.check_error ();
     return z3.toExpr (ast);
   }
@@ -353,7 +341,7 @@ namespace ufo
       z3::ast a (toAst (e));
       allDecls (static_cast<Z3_ast>(a), seen);
       for (Z3_func_decl fdecl : seen)
-	out << Z3_func_decl_to_string (ctx, fdecl) << "\n";
+        out << Z3_func_decl_to_string (ctx, fdecl) << "\n";
       return out.str ();
     }
 

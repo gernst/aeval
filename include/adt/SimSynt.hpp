@@ -13,96 +13,28 @@ namespace ufo
 
     ExprFactory &efac;
     SMTUtils u;
-    ExprVector &ops1;
-    ExprVector &ops2;
+    ExprVector &opsAdt;
+    ExprVector &opsArr;
 
     public:
 
-    SimSynt(ExprFactory& _efac, ExprVector& _ops1, ExprVector& _ops2) :
-      efac(_efac), u(_efac), ops1(_ops1), ops2(_ops2) {}
+    SimSynt(ExprFactory& _efac, ExprVector& _ops1, ExprVector& _ops2, ExprVector& _c) :
+      efac(_efac), u(_efac), opsAdt(_ops1), opsArr(_ops2), constructors(_c) {}
 
+    ExprVector& constructors;
+    Expr adtType;
     Expr baseCon;
     Expr indCon;
-    ExprSet allSubformulas;
     ExprMap varVersions;
-    ExprMap varVersions1;
+    ExprMap varVersionsInverse;
+    Expr baseFormula;
+    int stateProducingOp = -1;
+    int stateConsumingOp = -1;
 
-    void checkConstructor(Expr op, ExprVector& constructors, bool& base, bool& ind)
+    void getVarVersions(Expr op)
     {
-      base = false;
-      ind = false;
-      for (auto & c : constructors)
-      {
-        Expr capp;
-        if (isOpX<EQ>(op))
-        {
-          Expr lhs = op->left();
-          Expr rhs = op->right();
-          if (isOpX<FAPP>(rhs) && rhs->left() == c) capp = rhs;
-          else if (isOpX<FAPP>(lhs) && lhs->left() == c) capp = lhs;
-        }
-        if (capp != NULL)
-        {
-          for (int j = 0; j < c->arity() - 1; j++)
-          if (c->last() == c->arg(j))
-          {
-            // first comes first serve here (to be generalized)
-            if (indCon == NULL) indCon = capp;
-            ind = true;
-            break;
-          }
-          if (!ind)
-          {
-            // first comes firts serve here (to be generalized)
-            if (baseCon == NULL) baseCon = capp;
-            base = true;
-            break;
-          }
-        }
-      }
-    }
-
-    void proc(ExprVector& constructors)
-    {
-      assert(ops1.size() == ops2.size());
-
-      Expr baseFormula1, baseFormula2;
-      for (int i = 0; i < ops1.size(); i++)
-      {
-        bool base1, ind1, base2, ind2;
-        checkConstructor(ops1[i], constructors, base1, ind1);
-        checkConstructor(ops2[i], constructors, base2, ind2);
-        if (base1 || base2)
-        {
-          if (base1)
-          {
-            baseFormula1 = ops1[i];
-            baseFormula2 = ops2[i];
-          }
-          else
-          {
-            baseFormula1 = ops2[i];
-            baseFormula2 = ops1[i];
-          }
-        }
-        else
-        {
-          getConj(rewriteSelectStore(ops1[i]), allSubformulas);
-          getConj(rewriteSelectStore(ops2[i]), allSubformulas);
-        }
-      }
-
-      if (allSubformulas.size() == 0)
-      {
-        outs () << "Unable to proceed\n";
-        return;
-      }
-
       ExprSet vars;
-      ExprVector argsPrimed;
-      ExprVector types;
-      filter(conjoin(ops1, efac), bind::IsConst (), inserter(vars, vars.begin()));
-      filter(conjoin(ops2, efac), bind::IsConst (), inserter(vars, vars.begin()));
+      filter(op, bind::IsConst (), inserter(vars, vars.begin()));
       for (auto & v : vars)
       {
         string str = lexical_cast<string>(v);
@@ -113,28 +45,120 @@ namespace ufo
           {
             if (str == lexical_cast<string>(v1))
             {
-              varVersions[v] = v1;
-              varVersions1[v1] = v;
+              varVersionsInverse[v] = v1;
+              varVersions[v1] = v;
               break;
             }
           }
-          argsPrimed.push_back(v);
-          types.push_back(bind::typeOf(v));
         }
       }
+    }
 
-      types.push_back (mk<BOOL_TY> (efac));
-      Expr rel = bind::fdecl (mkTerm<string> ("R", efac), types);
+    bool isBaseConstructor(Expr c, Expr type)
+    {
+      return (c->last() == type && c->arity() == 2);
+    }
 
-      assert(isOpX<EQ>(baseFormula1));
+    bool isIndConstructor(Expr c, Expr type)
+    {
+      if (c->last() != type) return false;
+      for (int j = 0; j < c->arity() - 1; j++)
+        if (c->last() == c->arg(j)) return true;
 
-      ExprVector argsBase;
-      ExprVector argsInd1;
-      ExprVector argsInd2;
+      return false;
+    }
 
-      for (auto & v : argsPrimed)
+    void checkConstructor(int i)
+    {
+      ExprSet cnjs;
+      getConj(opsAdt[i], cnjs);
+      for (auto & op : cnjs)
       {
-        if (contains(baseFormula1, varVersions[v]))
+        for (auto & c : constructors)
+        {
+          Expr capp;
+          if (isOpX<EQ>(op))
+          {
+            Expr lhs = op->left();
+            Expr rhs = op->right();
+            if (isOpX<FAPP>(rhs) && rhs->left() == c) capp = rhs;
+            else if (isOpX<FAPP>(lhs) && lhs->left() == c) capp = lhs;
+          }
+          if (capp != NULL)
+          {
+            if (isBaseConstructor(c, bind::typeOf(capp)))
+            {
+              // first comes firts serve here (to be generalized)
+              if (baseCon == NULL) baseCon = capp;
+              if (baseFormula == NULL) baseFormula = opsArr[i];
+              return;
+            }
+            else if (isIndConstructor(c, bind::typeOf(capp)))
+            {
+              // first comes first serve here (to be generalized)
+              if (indCon == NULL) indCon = capp;
+              bool found = false;
+              for (auto & v : varVersionsInverse)
+                found |= contains(capp, v.first);
+
+              if (!found)
+              {
+                stateProducingOp = i; // TODO: check if several
+              }
+              else
+              {
+                stateConsumingOp = i;
+              }
+              return;
+            }
+          }
+        }
+      }
+    }
+
+    Expr createQuantifiedFormula(Expr def)
+    {
+      ExprSet vars;
+      ExprVector args;
+      filter(def, bind::IsConst (), inserter(vars, vars.begin()));
+      for (auto & a : vars) if (a != baseCon) args.push_back(a->last());
+      args.push_back(def);
+      return mknary<FORALL>(args);
+    }
+
+    void proc()
+    {
+      assert(opsAdt.size() == opsArr.size());
+
+      // preprocessing
+      for (int i = 0; i < opsAdt.size(); i++)
+      {
+        getVarVersions(opsAdt[i]);
+        getVarVersions(opsArr[i]);
+        checkConstructor(i);
+      }
+
+      adtType = bind::typeOf(indCon);
+
+      assert(adtType == bind::typeOf(indCon));
+      assert(stateProducingOp >= 0);
+//      assert(stateConsumingOp >= 0); // not used (yet)
+      assert(baseFormula != NULL);
+      assert(isOpX<EQ>(baseFormula));
+
+      // get vars, types and arguments for rules of R
+      ExprVector types;
+      ExprVector vars;
+      ExprVector argsBase;
+      ExprVector argsInd;
+
+      for (auto & p : varVersions)
+      {
+        Expr v = p.first;
+        vars.push_back(v);
+        types.push_back(bind::typeOf(v));
+
+        if (bind::typeOf(v) == adtType)
         {
           argsBase.push_back(baseCon);
         }
@@ -145,208 +169,128 @@ namespace ufo
             outs () << "NO UNPRIMED VAR FOR " << *v <<"\n";
             return;
           }
-          argsBase.push_back(varVersions[v]);
+          argsBase.push_back(v);
         }
-        argsInd1.push_back(v);                // primed
-        if (isOpX<AD_TY>(v->last()->last()))
-          argsInd2.push_back(v);   // unprimed
+        if (bind::typeOf(v) == adtType)
+          argsInd.push_back(indCon);   // use the app of the constructor(s) as argument
         else
-          argsInd2.push_back(varVersions[v]);
+          argsInd.push_back(v);        // use unprimed versions of other variables
       }
 
+      types.push_back (mk<BOOL_TY> (efac));
+      Expr rel = bind::fdecl (mkTerm<string> ("R", efac), types);
       Expr baseApp = bind::fapp (rel, argsBase);
-      Expr baseEq = mk<EQ>(baseApp, baseFormula2);
+      Expr baseDef = mk<EQ>(baseApp, baseFormula);
 
-      // serialize base case
-      ExprSet baseVars;
-      ExprVector baseArgs;
-      filter(baseEq, bind::IsConst (), inserter(baseVars, baseVars.begin()));
-      for (auto & a : baseVars) if (a != baseCon) baseArgs.push_back(a->last());
-      baseArgs.push_back(baseEq);
-      Expr baseRelation = mknary<FORALL>(baseArgs);
-      u.serialize_formula(baseRelation);
+      // create a quantified formula representing the base rule of R
+      Expr baseRule = createQuantifiedFormula(baseDef);
+      u.serialize_formula(baseRule);
 
-      ExprSet otherConstraints;
-      map <Expr, ExprVector> tmp;
-      for (auto & f : allSubformulas)
+      // prepare for the inductive rule construction
+      ExprSet indexVars;
+      getCounters (opsArr[stateProducingOp], indexVars);
+      Expr indexVar = *indexVars.begin(); // proceed with the least one
+      Expr accessTerm;
+
+      // identify how elements in the arrays are accessed (i.e., the indexVar)
+      // and what content is stored to the array
+      ExprSet transitions;
+      map<Expr, ExprSet> arrayContent;
+      getConj(opsArr[stateProducingOp], transitions);
+      for (auto tr : transitions)
       {
-        bool found = false;
-        for (auto & var : argsInd1)
+        if (contains (tr, indexVar) && !containsOp<ARRAY_TY>(tr))
         {
-          if (contains(f, var))
-          {
-            if (isOpX<EQ>(f))
-            {
-              if (var == f->left())
-              {
-                tmp[var].push_back(f->right());
-                found = true;
-              }
-              else if (var == f->right())
-              {
-                tmp[var].push_back(f->left());
-                found = true;
-              }
-            }
-          }
+          tr = normalizeArithm(tr);
+          tr = ineqSimplifier(indexVar, tr);
+          assert(tr->left() == indexVar);
+          accessTerm = replaceAll(tr->right(), varVersionsInverse);
         }
-        if (!found) otherConstraints.insert(f);
-      }
-
-      for (int adtVar = 0; adtVar < argsInd2.size(); adtVar++)
-      {
-        Expr var = argsInd2[adtVar];
-        // identify the only ADT-argument here
-        if(tmp[var].size() > 0)
+        else
         {
-          auto args = argsInd2;
-          // tmp[var] contains (possibly many) constructors of the ADT
-          for (auto & a : tmp[var])
+          ExprSet cnj;
+          getConj(rewriteSelectStore(tr), cnj);
+          for (auto & a : cnj)
           {
-            // compile LHS of the equality
-            args[adtVar] = a;
-            Expr indApp2 = bind::fapp (rel, args);
-
-            ExprSet vrs;
-            filter (a, bind::IsConst (), inserter(vrs, vrs.begin()));
-
-            int arrVar = -1;
-            for (int j = 0; j < argsInd2.size(); j++)
-            {
-              if (isOpX<ARRAY_TY>(argsInd2[j]->last()->last()))
-                arrVar = j;
-            }
-
-            int intVar = -1;
-            for (int j = 0; j < argsInd2.size(); j++)
-            {
-              if (isOpX<INT_TY>(argsInd2[j]->last()->last()))
-              {
-                if (intVar == -1) // hack right now (to try other index variables)
-                  intVar = j;
-              }
-            }
-
-            // guess RHS of the equality
-            if (arrVar >= 0 && intVar >= 0)
-            {
-              ExprSet cnjs;
-              for (auto & c : otherConstraints)
-              {
-                if (contains(c, argsInd2[intVar]) && !containsOp<AD_TY>(c) && !containsOp<ARRAY_TY>(c))
-                  cnjs.insert(c);
-              }
-              for (auto & vr : vrs)
-              {
-                if (vr->last()->last() == argsInd2[arrVar]->last()->last()->last())
-                {
-                  for (auto e : tmp[varVersions1[argsInd2[intVar]]])
-                  {
-                    if (isOpX<PLUS>(e)) e = mk<MINUS>(e->left(), e->right()); // hack right now
-                    ExprSet cnjs1 = cnjs;
-                    cnjs1.insert(mk<EQ>(vr, mk<SELECT>(argsInd2[arrVar], e)));
-                    ExprVector args2 = argsInd2;
-                    args2[intVar] = e;
-                    args2[adtVar] = varVersions[args2[adtVar]];
-                    cnjs1.insert(bind::fapp (rel, args2));
-
-                    ExprVector args1;
-                    ExprVector vars;
-
-                    filter(indApp2, bind::IsConst (), inserter(vars, vars.begin()));
-                    for (auto & a : vars)
-                    {
-                      if (a != baseCon) args1.push_back(a->last());
-                    }
-                    args1.push_back(mk<EQ>(indApp2, conjoin(cnjs1, efac)));
-                    Expr indRelation = mknary<FORALL>(args1);
-
-                    u.serialize_formula(indRelation);
-                  }
-                }
-              }
-            }
+            if (isOpX<EQ>(a) && isOpX<SELECT>(a->right()))
+              arrayContent[a->left()].insert(a->right()->last());
           }
         }
       }
 
-      /*
-      // find all combinations of inductive rules based on equations from the formulas
-      vector<int> combs;
-      for (auto & v : argsInd1)
+      assert(accessTerm != NULL);
+
+      // calculate the least fixedpoint over the indexVar variable
+      // currently, a simple heuristic is used, but it can be extended
+      ExprSet guesses;
+      mutateHeuristic (baseFormula, guesses);
+      Expr invariant;
+      for (auto & g : guesses)
       {
-        assert (tmp[v].size() > 0);
-        combs.push_back(tmp[v].size());
+        if (u.implies(baseFormula, g) &&
+            u.implies (mk<AND>(g, opsArr[stateProducingOp]), replaceAll(g, varVersions)))
+        {
+          invariant = g;
+          break;
+        }
       }
 
-      vector<vector<int>> res;
-      getCombinations(combs, res);
-      for (auto & a : res)
+      // TODO: further, this invariant can be used to generate an auxiliary lemma
+      //       e.g., \forall xs, n, A . R (xs, n, A) => invariant (n)
+
+      // get the "precondition" for the inductive rule of R:
+      // it should follow the fixedpoint but inconsistent with
+      // the precondition for the base rule of R (captured in baseFormula)
+      assert (invariant != NULL);
+      Expr remainingCnj = mk<AND>(invariant, mkNeg(baseFormula));
+
+      // prepare for the nested call of R in the inductive rule of R
+      ExprSet nonstateVars;
+      while (true)
       {
-        ExprVector args;
-        ExprVector argsVars;
-        int i = 0;
-        for (auto & v : argsInd1)
+        int nestedInd = -1;
+        for (int j = 1; j < indCon->arity(); j++)
         {
-          args.push_back(tmp[v][a[i]]);
-          filter (args.back(), bind::IsConst (), inserter(argsVars, argsVars.begin()));
-          i++;
-        }
-        Expr app = bind::fapp (rel, args);
-        ExprSet filteredConstraints;
-        for (auto & o : otherConstraints)
-        {
-          Expr c = replaceAll(o, argsInd1, args);
-          if (!hasExtraVars(c, argsVars)) filteredConstraints.insert(c);
-        }
-        filteredConstraints.insert(indApp2);
-        Expr indDef = mk<EQ>(app, conjoin(filteredConstraints, efac));
-
-        // serialize inductive case
-
-        ExprSet vars;
-        ExprVector args1;
-
-        filter(indDef, bind::IsConst (), inserter(vars, vars.begin()));
-        for (auto & a : vars)
-        {
-          if (a != baseCon)
+          if (adtType == bind::typeOf(indCon->arg(j)))
           {
-            args1.push_back(a->last());
-//            tmp.push_back(a);
+            if (isOpX<FAPP>(indCon->arg(j)) && isIndConstructor(indCon->arg(j)->left(), adtType))
+              nestedInd = j;
           }
+          else
+            nonstateVars.insert(indCon->arg(j));
         }
-        args1.push_back(indDef);
-        Expr indRelation = mknary<FORALL>(args1);
-        u.serialize_formula(indRelation);
-
-        // TODO: integrate with ADTSolver.hpp and generate lemmas
+        if (nestedInd == -1) break;
+        else indCon = indCon->arg(nestedInd);
       }
-       */
-    }
+      int arrVarInd = -1;
+      for (int j = 0; j < types.size(); j++) if (isOpX<ARRAY_TY>(types[j])) arrVarInd = j;
 
-    static void getCombinations(vector<int>& combs, vector<vector<int>>& res)
-    {
-      for (int i = 0; i < combs[0]; i++)
+      // get arguments of the nested call of R
+      ExprVector argsIndNested = argsInd;
+      for (int j = 0; j < types.size(); j++)
       {
-        vector<int> tmp;
-        tmp.push_back(i);
-        res.push_back(tmp);
+        if (isOpX<AD_TY>(types[j])) argsIndNested[j] = vars[j];
+        if (argsInd[j] == indexVar
+              /*types[j] == bind::typeOf(indexVar)*/) argsIndNested[j] = accessTerm;
       }
-      for (int pos = 1; pos < combs.size(); pos++)
-      {
-        int sz = res.size();
-        for (int i = 0; i < sz; i++)
+
+      // prepare the inductive definition of R (i.e., the RHS of the inductive rule)
+      ExprSet cnjs;
+      cnjs.insert(bind::fapp (rel, argsIndNested));
+      for (auto & a : nonstateVars)   // need to match all non-state vars
+      {                               // (obtained from the array and the ADT)
+        for (auto & b : arrayContent[a])
         {
-          res[i].push_back(0);
-          for (int j = 1; j < combs[pos]; j++)
-          {
-            vector<int> tmp = res[i];
-            tmp.back() = j;
-            res.push_back(tmp);
-          }
+          Expr accessTermTmp = normalizeArithm(replaceAll(accessTerm, indexVar, b));
+          cnjs.insert(mk<EQ>(a, mk<SELECT>(vars[arrVarInd], accessTermTmp)));
         }
       }
+      cnjs.insert(remainingCnj);
+      Expr inductiveDef = mk<EQ>(bind::fapp (rel, argsInd), conjoin(cnjs, efac));
+
+      // create a quantified formula representing the inductive rule
+      Expr indRule = createQuantifiedFormula(inductiveDef);
+      u.serialize_formula(indRule);
     }
   };
 
@@ -367,12 +311,23 @@ namespace ufo
   {
     ExprVector constructors;
     for (auto & a : z3.getAdtConstructors()) constructors.push_back(a);
-    ExprVector ops1;
-    ExprVector ops2;
-    getConj(s1, ops1);
-    getConj(s2, ops2);
-    SimSynt sim(efac, ops1, ops2);
-    sim.proc(constructors);
+    ExprVector opsAdt;
+    ExprVector opsArr;
+    if (containsOp<ARRAY_TY>(s2))
+    {
+      assert(containsOp<AD_TY>(s1));
+      getConj(s1, opsAdt);
+      getConj(s2, opsArr);
+    }
+    else
+    {
+      assert(containsOp<ARRAY_TY>(s1));
+      assert(containsOp<AD_TY>(s2));
+      getConj(s2, opsAdt);
+      getConj(s1, opsArr);
+    }
+    SimSynt sim(efac, opsAdt, opsArr, constructors);
+    sim.proc();
   }
 }
 
